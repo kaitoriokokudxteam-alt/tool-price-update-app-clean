@@ -2,7 +2,6 @@ import datetime
 import re
 import time
 import random
-import math
 from io import BytesIO
 from typing import Dict, List, Tuple, Optional, Callable, Any
 
@@ -1021,101 +1020,124 @@ elif page == "既存商品（価格決定・編集）":
 
     st.write(f"メーカー倍率：**{final_maker_rank}** / アイテム買取係数：**{item_buy_percent}%**")
 
-    # ====== 価格表：編集できるようにする（売価/買取だけ編集） ======
-    # ★やりたいこと：
-    #   - ユーザーが「売価」「買取」だけ触る
-    #   - 触った結果に応じて「値入額」「値入率」を自動で更新して表示する
-    #   - 買取は「1桁目を繰り上げ（10円単位で切り上げ）」して表示・保存する
+        # ====== 価格表：売価/買取だけ編集 → 値入額/値入率は自動再計算して同じ表に表示 ======
+    # 方針：
+    # - data_editor で編集できるのは「売価」「買取」だけ（価格ランクは固定）
+    # - 編集が入るたびに「値入額」「値入率」を再計算し、同じ表の列として表示する
+    # - 買取は「10円単位で切り上げ（1桁目繰り上げ）」して表示・保存する
 
-    def _to_int_or_blank(x):
+    def ceil_to_10(yen: int) -> int:
+        """10円単位で切り上げ（例：4375→4380）"""
+        try:
+            v = int(yen)
+        except Exception:
+            return 0
+        if v <= 0:
+            return 0
+        return ((v + 9) // 10) * 10
+
+    def _to_int_or_none(x):
         s = str(x).strip()
         if s == "" or s.lower() == "none":
-            return ""
+            return None
         try:
             return int(float(str(x).replace(",", "")))
         except Exception:
-            return ""
-
-    def _to_int_or_none(v):
-        if v is None:
-            return None
-        s = str(v).strip()
-        if s == "":
-            return None
-        try:
-            return int(float(str(v).replace(",", "")))
-        except Exception:
             return None
 
-    def _ceil_to_10(n: Optional[int]) -> Optional[int]:
-        if n is None:
-            return None
-        # マイナスは想定しないが、念のためそのまま返す
-        if n <= 0:
-            return n
-        return int(math.ceil(n / 10.0) * 10)
+    def build_price_table_for_editor(prices_dict: dict) -> "pd.DataFrame":
+        """prices(辞書) -> editor用DataFrame（計算列付き、列順固定）"""
+        rows = []
+        for rk in PRICE_RANKS:
+            p = prices_dict.get(rk, {})
+            sell = _to_int_or_none(p.get("売価"))
+            buy = _to_int_or_none(p.get("買取"))
+            if buy is not None:
+                buy = ceil_to_10(buy)
 
-    # 初期値（自動計算結果）
-    df_base = calc_margin_table(prices).copy()
-    df_input = df_base[["価格ランク", "売価", "買取"]].copy()
-    df_input["売価"] = df_input["売価"].apply(_to_int_or_blank)
-    df_input["買取"] = df_input["買取"].apply(_to_int_or_blank)
+            margin = None
+            rate = None
+            if sell is not None and buy is not None:
+                margin = sell - buy
+                if sell > 0:
+                    rate = round((margin / sell) * 100, 1)
 
-    st.caption("※ここは **売価/買取だけ** 編集できます。値入額・値入率は下の表で自動更新されます。")
+            rows.append({
+                "価格ランク": rk,
+                "売価": sell,
+                "買取": buy,
+                "値入額": margin,
+                "値入率": rate,  # %の数値（例：69.4）
+            })
+        df = pd.DataFrame(rows)
+        # 表示上の列順を固定
+        df = df[["価格ランク", "売価", "買取", "値入額", "値入率"]]
+        return df
 
-    edited_input = st.data_editor(
-        df_input,
+    # 初回だけ、基準計算結果(prices)を「編集用の元データ」として保持
+    if "price_table_edit_base" not in st.session_state:
+        st.session_state["price_table_edit_base"] = {
+            rk: {"売価": prices[rk]["売価"], "買取": prices[rk]["買取"]} for rk in PRICE_RANKS
+        }
+
+    # editor表示用（計算列付き）
+    df_prices_for_editor = build_price_table_for_editor(st.session_state["price_table_edit_base"])
+
+    edited_df = st.data_editor(
+        df_prices_for_editor,
         use_container_width=True,
         hide_index=True,
         key="edited_price_table",
         column_config={
-            "価格ランク": st.column_config.TextColumn("価格ランク", disabled=True),
-            "売価": st.column_config.NumberColumn("売価", step=10),
-            "買取": st.column_config.NumberColumn("買取", step=10),
+            "価格ランク": st.column_config.TextColumn("価格ランク"),
+            "売価": st.column_config.NumberColumn("売価", step=10, format="%d"),
+            "買取": st.column_config.NumberColumn("買取", step=10, format="%d"),
+            "値入額": st.column_config.NumberColumn("値入額", format="%d"),
+            "値入率": st.column_config.NumberColumn("値入率", format="%.1f"),
         },
-        disabled=["価格ランク"],
+        disabled=["価格ランク", "値入額", "値入率"],
     )
 
-    # 編集後の売価/買取を取り出し → 買取は10円単位で切り上げ
-    edited_prices = {r: {"売価": None, "買取": None} for r in PRICE_RANKS}
-    for _, rr in edited_input.iterrows():
-        rank = str(rr.get("価格ランク", "")).strip()
-        if rank not in edited_prices:
+    # ここで「売価/買取」の編集結果を session_state に反映
+    # → 値入額/値入率は次のrerunで再計算され、同じ表に即反映される
+    edited_prices_base = st.session_state["price_table_edit_base"]
+    changed = False
+
+    for _, rr in edited_df.iterrows():
+        rk = str(rr.get("価格ランク", "")).strip()
+        if rk not in edited_prices_base:
             continue
-        sell = _to_int_or_none(rr.get("売価"))
-        buy_raw = _to_int_or_none(rr.get("買取"))
-        buy = _ceil_to_10(buy_raw)
-        edited_prices[rank]["売価"] = sell
-        edited_prices[rank]["買取"] = buy
 
-    # 画面表示用（値入額・値入率を再計算）
-    view_rows = []
-    for r in PRICE_RANKS:
-        sell = edited_prices[r]["売価"]
-        buy = edited_prices[r]["買取"]
-        if sell is None or buy is None or sell == 0:
-            margin = "" if (sell is None or buy is None) else (sell - buy)
-            rate = ""
-        else:
-            margin = sell - buy
-            rate = f"{(margin / sell) * 100.0:.1f}%"
-        view_rows.append({
-            "価格ランク": r,
-            "売価": "" if sell is None else sell,
-            "買取（10円切上）": "" if buy is None else buy,
-            "値入額（売価-買取）": margin,
-            "値入率（値入額/売価）": rate,
-        })
+        new_sell = _to_int_or_none(rr.get("売価"))
+        new_buy = _to_int_or_none(rr.get("買取"))
+        if new_buy is not None:
+            new_buy = ceil_to_10(new_buy)
 
-    st.markdown("#### 計算結果（自動更新）")
-    st.dataframe(pd.DataFrame(view_rows), use_container_width=True, hide_index=True)
+        old_sell = _to_int_or_none(edited_prices_base[rk].get("売価"))
+        old_buy = _to_int_or_none(edited_prices_base[rk].get("買取"))
+        if old_buy is not None:
+            old_buy = ceil_to_10(old_buy)
 
-    # ⑥保存が編集後を使えるように session_state に入れておく
-    # （保存時はこの値を優先して使う）
+        if new_sell != old_sell or new_buy != old_buy:
+            edited_prices_base[rk]["売価"] = new_sell
+            edited_prices_base[rk]["買取"] = new_buy
+            changed = True
+
+    # ⑥保存が編集後を使えるように session_state["edited_prices"] を作る（従来の辞書形式）
+    edited_prices = {}
+    for rk in PRICE_RANKS:
+        p = edited_prices_base.get(rk, {})
+        edited_prices[rk] = {"売価": _to_int_or_none(p.get("売価")), "買取": _to_int_or_none(p.get("買取"))}
+        if edited_prices[rk]["買取"] is not None:
+            edited_prices[rk]["買取"] = ceil_to_10(edited_prices[rk]["買取"])
+
     st.session_state["edited_prices"] = edited_prices
 
+    # 変更があった場合、即 rerun して計算列を最新化（同じ表に反映）
+    if changed:
+        st.rerun()
 
-    memo = st.text_input("メモ（任意）", value=f"maker={final_maker_name}, item={final_item_name}", key="memo")
+memo = st.text_input("メモ（任意）", value=f"maker={final_maker_name}, item={final_item_name}", key="memo")
 
     st.divider()
     colA, colB = st.columns([1, 1])
