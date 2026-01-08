@@ -429,12 +429,41 @@ def get_maker_percent(df_maker_coef: pd.DataFrame, maker_rank: str, item_name: s
     need = {"メーカーランク", "項目", "未使用", "A", "B", "C", "D"}
     if not need.issubset(set(df_maker_coef.columns)):
         return None
+    mr = str(maker_rank).strip()
+    it = str(item_name).strip()
+
+    # まずは完全一致
     sub = df_maker_coef[
-        (df_maker_coef["メーカーランク"].astype(str).str.strip() == str(maker_rank).strip())
-        & (df_maker_coef["項目"].astype(str).str.strip() == str(item_name).strip())
+        (df_maker_coef["メーカーランク"].astype(str).str.strip() == mr)
+        & (df_maker_coef["項目"].astype(str).str.strip() == it)
     ]
+
+    # 見つからない場合：表記ゆれ（例：売価(%) / 買取率 など）を吸収
+    if sub.empty:
+        col_item = df_maker_coef["項目"].astype(str).str.strip()
+        # item_name が含まれる行（部分一致）
+        sub = df_maker_coef[
+            (df_maker_coef["メーカーランク"].astype(str).str.strip() == mr)
+            & (col_item.str.contains(re.escape(it), na=False))
+        ]
+
+    # さらに見つからない場合：売価/買取の同義語も試す
+    if sub.empty and it in ("売価", "買取"):
+        synonyms = {
+            "売価": ["売価", "販売", "販売価格", "売価率", "売価(%)", "売価％"],
+            "買取": ["買取", "買取価格", "買取率", "買取(%)", "買取％"],
+        }[it]
+        col_item = df_maker_coef["項目"].astype(str).str.strip()
+        mask_syn = False
+        for s in synonyms:
+            mask_syn = mask_syn | col_item.str.contains(re.escape(s), na=False)
+        sub = df_maker_coef[
+            (df_maker_coef["メーカーランク"].astype(str).str.strip() == mr) & mask_syn
+        ]
+
     if sub.empty:
         return None
+
     return safe_to_number(sub.iloc[0].get(price_rank, ""))
 
 
@@ -1015,7 +1044,19 @@ elif page == "既存商品（価格決定・編集）":
     base_option = st.selectbox("基準値（10種）", BASE_OPTIONS, index=1, key="base_option")
     base_price = safe_to_number(st.text_input("基準値に入れる金額（円）", value="", key="base_price"))
 
-    base_x = derive_base_x_from_selected_price(base_option, base_price, final_maker_rank, df_maker_coef, item_buy_percent)
+    # base_price が未入力のタイミングで編集テーブルを初期化してしまうと、
+    # その後に金額を入れても None のまま固定されてしまうため、
+    # "基準値が確定したとき" だけ初期化／再初期化する。
+    base_key = (
+        normalize_text(final_maker_rank),
+        normalize_text(final_item_rank),
+        normalize_text(base_option),
+        base_price,
+    )
+
+    base_x = derive_base_x_from_selected_price(
+        base_option, base_price, final_maker_rank, df_maker_coef, item_buy_percent
+    )
     prices = calc_all_prices_from_base_x(base_x, final_maker_rank, df_maker_coef, item_buy_percent)
 
     st.write(f"メーカー倍率：**{final_maker_rank}** / アイテム買取係数：**{item_buy_percent}%**")
@@ -1074,11 +1115,22 @@ elif page == "既存商品（価格決定・編集）":
         df = df[["価格ランク", "売価", "買取", "値入額", "値入率"]]
         return df
 
-    # 初回だけ、基準計算結果(prices)を「編集用の元データ」として保持
-    if "price_table_edit_base" not in st.session_state:
-        st.session_state["price_table_edit_base"] = {
-            rk: {"売価": prices[rk]["売価"], "買取": prices[rk]["買取"]} for rk in PRICE_RANKS
-        }
+    # 初回、または基準値が変わった時だけ、基準計算結果(prices)を「編集用の元データ」として保持
+    # ※ base_price が None のときは初期化しない（None固定事故を防ぐ）
+    if base_price is not None:
+        if (
+            "price_table_edit_base" not in st.session_state
+            or st.session_state.get("price_table_base_key") != base_key
+        ):
+            st.session_state["price_table_edit_base"] = {
+                rk: {"売価": prices[rk]["売価"], "買取": prices[rk]["買取"]} for rk in PRICE_RANKS
+            }
+            st.session_state["price_table_base_key"] = base_key
+    else:
+        st.info("**基準値に入れる金額（円）** を入力すると、売価/買取が自動計算されます。")
+        # 表は出すが、編集元は作らない（入力後に改めて初期化される）
+        if "price_table_edit_base" not in st.session_state:
+            st.session_state["price_table_edit_base"] = {rk: {"売価": None, "買取": None} for rk in PRICE_RANKS}
 
     # editor表示用（計算列付き）
     df_prices_for_editor = build_price_table_for_editor(st.session_state["price_table_edit_base"])
