@@ -2,6 +2,7 @@ import datetime
 import re
 import time
 import random
+import math
 from io import BytesIO
 from typing import Dict, List, Tuple, Optional, Callable, Any
 
@@ -1021,7 +1022,10 @@ elif page == "既存商品（価格決定・編集）":
     st.write(f"メーカー倍率：**{final_maker_rank}** / アイテム買取係数：**{item_buy_percent}%**")
 
     # ====== 価格表：編集できるようにする（売価/買取だけ編集） ======
-    df_prices = calc_margin_table(prices).copy()
+    # ★やりたいこと：
+    #   - ユーザーが「売価」「買取」だけ触る
+    #   - 触った結果に応じて「値入額」「値入率」を自動で更新して表示する
+    #   - 買取は「1桁目を繰り上げ（10円単位で切り上げ）」して表示・保存する
 
     def _to_int_or_blank(x):
         s = str(x).strip()
@@ -1031,24 +1035,6 @@ elif page == "既存商品（価格決定・編集）":
             return int(float(str(x).replace(",", "")))
         except Exception:
             return ""
-
-    df_prices["売価"] = df_prices["売価"].apply(_to_int_or_blank)
-    df_prices["買取"] = df_prices["買取"].apply(_to_int_or_blank)
-
-    edited_df = st.data_editor(
-        df_prices,
-        use_container_width=True,
-        hide_index=True,
-        key="edited_price_table",
-        column_config={
-            "価格ランク": st.column_config.TextColumn("価格ランク", disabled=True),
-            "売価": st.column_config.NumberColumn("売価", step=10),
-            "買取": st.column_config.NumberColumn("買取", step=10),
-            "値入額": st.column_config.TextColumn("値入額", disabled=True),
-            "値入率": st.column_config.TextColumn("値入率", disabled=True),
-        },
-        disabled=["価格ランク", "値入額", "値入率"],
-    )
 
     def _to_int_or_none(v):
         if v is None:
@@ -1061,15 +1047,73 @@ elif page == "既存商品（価格決定・編集）":
         except Exception:
             return None
 
+    def _ceil_to_10(n: Optional[int]) -> Optional[int]:
+        if n is None:
+            return None
+        # マイナスは想定しないが、念のためそのまま返す
+        if n <= 0:
+            return n
+        return int(math.ceil(n / 10.0) * 10)
+
+    # 初期値（自動計算結果）
+    df_base = calc_margin_table(prices).copy()
+    df_input = df_base[["価格ランク", "売価", "買取"]].copy()
+    df_input["売価"] = df_input["売価"].apply(_to_int_or_blank)
+    df_input["買取"] = df_input["買取"].apply(_to_int_or_blank)
+
+    st.caption("※ここは **売価/買取だけ** 編集できます。値入額・値入率は下の表で自動更新されます。")
+
+    edited_input = st.data_editor(
+        df_input,
+        use_container_width=True,
+        hide_index=True,
+        key="edited_price_table",
+        column_config={
+            "価格ランク": st.column_config.TextColumn("価格ランク", disabled=True),
+            "売価": st.column_config.NumberColumn("売価", step=10),
+            "買取": st.column_config.NumberColumn("買取", step=10),
+        },
+        disabled=["価格ランク"],
+    )
+
+    # 編集後の売価/買取を取り出し → 買取は10円単位で切り上げ
     edited_prices = {r: {"売価": None, "買取": None} for r in PRICE_RANKS}
-    for _, rr in edited_df.iterrows():
-        rank = str(rr["価格ランク"]).strip()
-        if rank in edited_prices:
-            edited_prices[rank]["売価"] = _to_int_or_none(rr.get("売価"))
-            edited_prices[rank]["買取"] = _to_int_or_none(rr.get("買取"))
+    for _, rr in edited_input.iterrows():
+        rank = str(rr.get("価格ランク", "")).strip()
+        if rank not in edited_prices:
+            continue
+        sell = _to_int_or_none(rr.get("売価"))
+        buy_raw = _to_int_or_none(rr.get("買取"))
+        buy = _ceil_to_10(buy_raw)
+        edited_prices[rank]["売価"] = sell
+        edited_prices[rank]["買取"] = buy
+
+    # 画面表示用（値入額・値入率を再計算）
+    view_rows = []
+    for r in PRICE_RANKS:
+        sell = edited_prices[r]["売価"]
+        buy = edited_prices[r]["買取"]
+        if sell is None or buy is None or sell == 0:
+            margin = "" if (sell is None or buy is None) else (sell - buy)
+            rate = ""
+        else:
+            margin = sell - buy
+            rate = f"{(margin / sell) * 100.0:.1f}%"
+        view_rows.append({
+            "価格ランク": r,
+            "売価": "" if sell is None else sell,
+            "買取（10円切上）": "" if buy is None else buy,
+            "値入額（売価-買取）": margin,
+            "値入率（値入額/売価）": rate,
+        })
+
+    st.markdown("#### 計算結果（自動更新）")
+    st.dataframe(pd.DataFrame(view_rows), use_container_width=True, hide_index=True)
 
     # ⑥保存が編集後を使えるように session_state に入れておく
+    # （保存時はこの値を優先して使う）
     st.session_state["edited_prices"] = edited_prices
+
 
     memo = st.text_input("メモ（任意）", value=f"maker={final_maker_name}, item={final_item_name}", key="memo")
 
