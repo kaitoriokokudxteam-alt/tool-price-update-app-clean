@@ -1137,7 +1137,7 @@ elif page == "既存商品（価格決定・編集）":
     if changed:
         st.rerun()
 
-memo = st.text_input("メモ（任意）", value=f"maker={final_maker_name}, item={final_item_name}", key="memo")
+    memo = st.text_input("メモ（任意）", value=f"maker={final_maker_name}, item={final_item_name}", key="memo")
 
     st.divider()
     colA, colB = st.columns([1, 1])
