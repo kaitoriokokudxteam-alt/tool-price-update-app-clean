@@ -12,9 +12,9 @@ from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 
 
-# =========================
-# シート名（Google Sheets）
-# =========================
+# ==========================================
+# シート名および定数定義
+# ==========================================
 SHEET_CATALOG = "T_catalog"
 SHEET_MAKER = "Tメーカー"
 SHEET_ITEM = "Tアイテム"
@@ -27,15 +27,7 @@ SHEET_TMP_RULES = "売買価格ルール設定出力"
 SHEET_LOG_CATALOG = "カタログログ"
 SHEET_LOG_RULES = "価格ログ"
 
-# =========================
-# マスターの正しい列順
-# =========================
-MAKER_HEADERS = ["メーカー名", "揺らぎ", "メーカーランク"]
-ITEM_HEADERS = ["アイテム名", "アイテムランク", "揺らぎ"]
-
-# =========================
-# カタログ・ルール：列定義
-# =========================
+# カタログ保存用（32列）
 CATALOG_STORE_HEADERS_32 = [
     "商品ID", "商品コード", "商品代替コード", "ステータス", "ステータス名", "商品名",
     "カテゴリID", "カテゴリ名", "完全カテゴリID", "完全カテゴリ名", "グロスモード",
@@ -48,6 +40,7 @@ CATALOG_STORE_HEADERS_32 = [
     "TAYS ID(商品属性.tays_id)", "商品作成日", "商品更新日", "ハッシュ",
 ]
 
+# カタログ出力用（25列）
 CATALOG_EXPORT_HEADERS_25 = [
     "商品ID", "商品コード", "商品代替コード", "ステータス", "商品名", "カテゴリID",
     "グロスモード", "量り買い", "量り買い単位", "税率タイプ", "免税区分", "画像URL",
@@ -59,6 +52,7 @@ CATALOG_EXPORT_HEADERS_25 = [
     "TAYS ID(商品属性.tays_id)",
 ]
 
+# 売買価格ルール用（74列）
 RULE_EXPORT_HEADERS_74 = (
     ["商品ID", "商品コード", "画像URL", "メモ"]
     + sum(([f"設定.{i}.対象グレードID", f"設定.{i}.買取価格モード", f"設定.{i}.買取価格設定値", f"設定.{i}.買取価格対象モール", f"設定.{i}.販売価格モード", f"設定.{i}.販売価格設定値", f"設定.{i}.販売価格対象モール"] for i in range(1, 11)), [])
@@ -73,37 +67,34 @@ BASE_OPTIONS = [
     "未使用 買取", "A 買取", "B 買取", "C 買取", "D 買取",
 ]
 
-# =========================
-# ロジック：切り下げ関数 (多聞様指定ルール)
-# =========================
+# ==========================================
+# ロジック：切り下げ関数（多聞様指定ルール）
+# ==========================================
 def floor_price_custom(price: float) -> int:
-    """
-    - 5桁以上 (12345 -> 12000): 1000円単位切り下げ
-    - 4桁 or 3桁 (1234 -> 1200, 123 -> 100): 100円単位切り下げ
-    - 2桁 (12 -> 10): 10円単位切り下げ
-    """
-    if price <= 0: return 0
+    if price <= 0:
+        return 0
     p = int(price)
     length = len(str(p))
     if length >= 5:
-        return (p // 1000) * 1000
+        return (p // 1000) * 1000  # 12345 -> 12000
     elif length >= 3:
-        return (p // 100) * 100
+        return (p // 100) * 100    # 1234 -> 1200, 123 -> 100
     elif length == 2:
-        return (p // 10) * 10
+        return (p // 10) * 10      # 12 -> 10
     else:
-        return p
+        return p                   # 1 -> 1
 
-# =========================
-# Google Sheets 接続 & ユーティリティ
-# =========================
+# ==========================================
+# Google Sheets 接続およびリトライ処理
+# ==========================================
 def _is_quota_error(e: Exception) -> bool:
     if not isinstance(e, APIError): return False
     return "[429]" in str(e) or "Quota exceeded" in str(e)
 
 def call_with_retry(fn: Callable[[], Any], tries: int = 9, base_sleep: float = 1.5) -> Any:
     for i in range(tries):
-        try: return fn()
+        try:
+            return fn()
         except Exception as e:
             if _is_quota_error(e) and i < tries - 1:
                 time.sleep(base_sleep * (2 ** i) + random.uniform(0.0, 1.0))
@@ -123,22 +114,19 @@ def open_spreadsheet() -> gspread.Spreadsheet:
     spreadsheet_id = st.secrets["app"]["spreadsheet_id"]
     return call_with_retry(lambda: gc.open_by_key(spreadsheet_id))
 
+# ==========================================
+# 共通ユーティリティ
+# ==========================================
 def normalize_text(x) -> str:
     return str(x).strip() if pd.notna(x) else ""
 
-def to_text_keep_zeros(x) -> str:
-    if pd.isna(x): return ""
-    s = str(x).strip()
-    return s[:-2] if re.fullmatch(r"\d+\.0", s) else s
-
 def safe_to_number(s: str) -> Optional[float]:
     if not s: return None
-    try: return float(str(s).replace(",", ""))
-    except: return None
+    try:
+        return float(str(s).replace(",", "").replace("¥", ""))
+    except:
+        return None
 
-# =========================
-# ワークシート操作系
-# =========================
 def ensure_worksheet(ss: gspread.Spreadsheet, title: str, headers: List[str]) -> gspread.Worksheet:
     try:
         ws = call_with_retry(lambda: ss.worksheet(title))
@@ -158,7 +146,8 @@ def find_row_number_by_key(ws: gspread.Worksheet, key_col_name: str, key_value: 
     vals = call_with_retry(lambda: ws.col_values(col_idx))
     val_s = str(key_value).strip()
     for i, v in enumerate(vals, start=1):
-        if i > 1 and str(v).strip() == val_s: return i
+        if i > 1 and str(v).strip() == val_s:
+            return i
     return None
 
 def read_row_as_dict(ws: gspread.Worksheet, row_no: int) -> Dict[str, str]:
@@ -176,9 +165,9 @@ def update_cells_by_headers(ws: gspread.Worksheet, row_no: int, updates: Dict[st
     if data:
         call_with_retry(lambda: ws.spreadsheet.values_batch_update({"valueInputOption": "RAW", "data": data}))
 
-# =========================
-# 判定・メンテナンスロジック
-# =========================
+# ==========================================
+# マスター判定・メンテナンスロジック
+# ==========================================
 def split_yuragi_cell(cell: str) -> List[str]:
     s = normalize_text(cell)
     return [p.strip() for p in re.split(r"[,\n、]", s) if p.strip()]
@@ -197,40 +186,40 @@ def find_best_match_in_name(product_name: str, df: pd.DataFrame, name_col: str, 
                 best_name, best_rank, best_hit, best_len = name, rank, y, len(y)
     return best_name, best_rank, best_hit
 
-def move_yuragi_keyword(sh, sheet_name, name_col, yuragi_col, rank_col, old_master_name, new_master_name, keyword, new_rank):
-    """揺らぎの付け替え：旧マスターから削除し、新マスターへ追加"""
+def move_yuragi_keyword(sh, sheet_name, name_col, yuragi_col, rank_col, old_name, new_name, keyword, new_rank):
+    """揺らぎの付け替えロジック"""
     ws = sh.worksheet(sheet_name)
     data = ws.get_all_values()
     headers = data[0]
     df = pd.DataFrame(data[1:], columns=headers)
     
-    # 旧マスターから削除（ヒットしていた場合）
-    if old_master_name and old_master_name in df[name_col].values:
-        idx = df[df[name_col] == old_master_name].index[0]
-        current = split_yuragi_cell(df.at[idx, yuragi_col])
-        if keyword in current:
-            current.remove(keyword)
-            ws.update_cell(idx + 2, headers.index(yuragi_col) + 1, ",".join(current))
+    # 1. 旧マスターからキーワードを削除
+    if old_name and old_name in df[name_col].values:
+        idx = df[df[name_col] == old_name].index[0]
+        current_yuragi = split_yuragi_cell(df.at[idx, yuragi_col])
+        if keyword in current_yuragi:
+            current_yuragi.remove(keyword)
+            ws.update_cell(idx + 2, headers.index(yuragi_col) + 1, ",".join(current_yuragi))
             
-    # 新マスターへ追加・更新
-    if new_master_name in df[name_col].values:
-        idx = df[df[name_col] == new_master_name].index[0]
-        current = split_yuragi_cell(df.at[idx, yuragi_col])
-        if keyword not in current:
-            current.append(keyword)
-        ws.update_cell(idx + 2, headers.index(yuragi_col) + 1, ",".join(current))
+    # 2. 新マスターへ追加または更新
+    if new_name in df[name_col].values:
+        idx = df[df[name_col] == new_name].index[0]
+        current_yuragi = split_yuragi_cell(df.at[idx, yuragi_col])
+        if keyword not in current_yuragi:
+            current_yuragi.append(keyword)
+        ws.update_cell(idx + 2, headers.index(yuragi_col) + 1, ",".join(current_yuragi))
         ws.update_cell(idx + 2, headers.index(rank_col) + 1, new_rank)
     else:
-        # 新規メーカーとして登録
+        # 新規メーカーとして追加
         new_row = [""] * len(headers)
-        new_row[headers.index(name_col)] = new_master_name
+        new_row[headers.index(name_col)] = new_name
         new_row[headers.index(yuragi_col)] = keyword
         new_row[headers.index(rank_col)] = new_rank
         ws.append_row(new_row)
 
-# =========================
-# 価格計算・ルール生成
-# =========================
+# ==========================================
+# 価格計算ロジック
+# ==========================================
 def get_item_buy_percent(df_item_coef, item_rank):
     if df_item_coef.empty: return None
     sub = df_item_coef[df_item_coef["アイテムランク"].astype(str).str.strip() == str(item_rank).strip()]
@@ -262,8 +251,8 @@ def calc_all_prices(base_x, maker_rank, df_maker_coef, item_buy_percent):
     return out
 
 def build_rule_row(pid, code, img, prices_dict) -> Dict[str, str]:
-    """74列のルール行を生成"""
-    row = {"商品ID": pid, "商品コード": code, "画像URL": img, "メモ": "AutoUpdated"}
+    """T_rules用の74列データを構築"""
+    row = {"商品ID": pid, "商品コード": code, "画像URL": img, "メモ": "価格更新アプリにて自動計算"}
     for rk in PRICE_RANKS:
         idx = SETTING_INDEX_BY_RANK[rk]
         row[f"設定.{idx}.対象グレードID"] = GRADE_ID_BY_RANK[rk]
@@ -274,13 +263,12 @@ def build_rule_row(pid, code, img, prices_dict) -> Dict[str, str]:
         v_s = prices_dict[rk]["売価"]
         v_b = prices_dict[rk]["買取"]
         row[f"設定.{idx}.販売価格設定値"] = str(v_s) if v_s else ""
-        # 買取価格に切り下げを適用して保存
         row[f"設定.{idx}.買取価格設定値"] = str(floor_price_custom(v_b)) if v_b else ""
     return row
 
-# =========================
+# ==========================================
 # 画面構成
-# =========================
+# ==========================================
 @st.cache_resource
 def prepare_sheets_cached():
     ss = open_spreadsheet()
@@ -304,9 +292,6 @@ def load_master_tables():
         return pd.DataFrame(vals[1:], columns=vals[0]) if len(vals) > 1 else pd.DataFrame()
     return ws_to_df(SHEET_MAKER), ws_to_df(SHEET_ITEM), ws_to_df(SHEET_MAKER_COEF), ws_to_df(SHEET_ITEM_COEF)
 
-# =========================
-# Main
-# =========================
 if "current_pid" not in st.session_state: st.session_state["current_pid"] = ""
 if "loaded" not in st.session_state: st.session_state["loaded"] = False
 
@@ -318,35 +303,29 @@ env = prepare_sheets_cached()
 df_maker, df_item, df_maker_coef, df_item_coef = load_master_tables()
 
 # ---------------------------------------------------------
-# Page 1: インポート (全機能を維持)
+# Page 1: インポート
 # ---------------------------------------------------------
 if page == "1) インポート":
     st.header("1) インポート")
     up_cat = st.file_uploader("商品カタログCSV", type=["csv"])
     up_rule = st.file_uploader("売買価格ルール設定CSV", type=["csv"])
-    
     if st.button("スプレッドシートへ取り込む"):
         if up_cat:
-            df = pd.read_csv(up_cat, dtype=str)
-            df = df.reindex(columns=CATALOG_STORE_HEADERS_32).fillna("")
-            vals = [CATALOG_STORE_HEADERS_32] + df.values.tolist()
+            df = pd.read_csv(up_cat, dtype=str).reindex(columns=CATALOG_STORE_HEADERS_32).fillna("")
             call_with_retry(lambda: env["ws_catalog"].clear())
-            call_with_retry(lambda: env["ws_catalog"].update(values=vals, range_name="A1"))
+            call_with_retry(lambda: env["ws_catalog"].update(values=[CATALOG_STORE_HEADERS_32] + df.values.tolist(), range_name="A1"))
             st.success("カタログ取り込み完了")
         if up_rule:
-            df = pd.read_csv(up_rule, dtype=str)
-            df = df.reindex(columns=RULE_EXPORT_HEADERS_74).fillna("")
-            vals = [RULE_EXPORT_HEADERS_74] + df.values.tolist()
+            df = pd.read_csv(up_rule, dtype=str).reindex(columns=RULE_EXPORT_HEADERS_74).fillna("")
             call_with_retry(lambda: env["ws_rules"].clear())
-            call_with_retry(lambda: env["ws_rules"].update(values=vals, range_name="A1"))
+            call_with_retry(lambda: env["ws_rules"].update(values=[RULE_EXPORT_HEADERS_74] + df.values.tolist(), range_name="A1"))
             st.success("ルール取り込み完了")
 
 # ---------------------------------------------------------
-# Page 2: 既存商品（価格決定・編集） (修正依頼を反映)
+# Page 2: 既存商品（価格決定・編集）
 # ---------------------------------------------------------
 elif page == "2) 既存商品（価格決定・編集）":
     st.header("2) 既存商品（価格決定・編集）")
-    
     with st.form("load_form"):
         pid_input = st.text_input("商品IDまたは型番", value=st.session_state["current_pid"])
         if st.form_submit_button("呼び出す"):
@@ -360,112 +339,143 @@ elif page == "2) 既存商品（価格決定・編集）":
         if not row_no:
             st.error("商品が見つかりません。")
             st.stop()
-            
         row = read_row_as_dict(env["ws_catalog"], row_no)
         
-        col1, col2 = st.columns(2)
-        with col1:
+        c1, c2 = st.columns(2)
+        with c1:
             edit_name = st.text_input("商品名", value=row.get("商品名", ""))
             edit_mpn = st.text_input("型番", value=row.get("型番(商品属性.mpn)", ""))
-        with col2:
-            st.text_input("JAN", value=row.get("JANコード(商品属性.jan)", ""), disabled=True)
+        with c2:
+            st.text_input("JANコード", value=row.get("JANコード(商品属性.jan)", ""), disabled=True)
             if row.get("画像URL"): st.image(row["画像URL"], width=150)
 
-        # 自動判定の実行
-        m_auto_name, m_auto_rank, m_auto_hit = find_best_match_in_name(edit_name, df_maker, "メーカー名", "メーカーランク", "揺らぎ")
-        i_auto_name, i_auto_rank, i_auto_hit = find_best_match_in_name(edit_name, df_item, "アイテム名", "アイテムランク", "揺らぎ")
+        # 自動判定ロジック
+        ma_n, ma_r, ma_h = find_best_match_in_name(edit_name, df_maker, "メーカー名", "メーカーランク", "揺らぎ")
+        ia_n, ia_r, ia_h = find_best_match_in_name(edit_name, df_item, "アイテム名", "アイテムランク", "揺らぎ")
 
         st.divider()
-        cm, ci = st.columns(2)
-        
-        # --- メーカー修正UI ---
-        with cm:
+        col_m, col_i = st.columns(2)
+        with col_m:
             st.subheader("メーカー設定")
-            st.caption(f"判定結果: {m_auto_name or 'なし'} ({m_auto_rank or '-'})")
+            st.caption(f"自動判定: {ma_n or 'なし'} ({ma_r or '-'})")
             m_list = [""] + df_maker["メーカー名"].unique().tolist() + ["(新規登録)"]
-            selected_m = st.selectbox("メーカー選択", options=m_list, index=m_list.index(m_auto_name) if m_auto_name in m_list else 0)
-            final_m_name = st.text_input("メーカー名(確定)", value=selected_m if selected_m != "(新規登録)" else "")
+            sel_m = st.selectbox("メーカー選択", options=m_list, index=m_list.index(ma_n) if ma_n in m_list else 0)
+            fin_m_name = st.text_input("メーカー名（確定）", value=sel_m if sel_m != "(新規登録)" else "")
             m_ranks = ["A", "B", "C", "D", "E"]
-            final_m_rank = st.selectbox("メーカーランク修正", options=m_ranks, index=m_ranks.index(m_auto_rank) if m_auto_rank in m_ranks else 2)
-
-        # --- アイテム修正UI ---
-        with ci:
+            fin_m_rank = st.selectbox("メーカーランク修正", options=m_ranks, index=m_ranks.index(ma_r) if ma_r in m_ranks else 2)
+        with col_i:
             st.subheader("アイテム設定")
-            st.caption(f"判定結果: {i_auto_name or 'なし'} ({i_auto_rank or '-'})")
+            st.caption(f"自動判定: {ia_n or 'なし'} ({ia_r or '-'})")
             i_list = [""] + df_item["アイテム名"].unique().tolist() + ["(新規登録)"]
-            selected_i = st.selectbox("アイテム選択", options=i_list, index=i_list.index(i_auto_name) if i_auto_name in i_list else 0)
-            final_i_name = st.text_input("アイテム名(確定)", value=selected_i if selected_i != "(新規登録)" else "")
-            final_i_rank = st.selectbox("アイテムランク修正", options=m_ranks, index=m_ranks.index(i_auto_rank) if i_auto_rank in m_ranks else 2)
+            sel_i = st.selectbox("アイテム選択", options=i_list, index=i_list.index(ia_n) if ia_n in i_list else 0)
+            fin_i_name = st.text_input("アイテム名（確定）", value=sel_i if sel_i != "(新規登録)" else "")
+            fin_i_rank = st.selectbox("アイテムランク修正", options=m_ranks, index=m_ranks.index(ia_r) if ia_r in m_ranks else 2)
 
         st.divider()
-        item_pct = get_item_buy_percent(df_item_coef, final_i_rank)
-        if item_pct:
+        item_pct = get_item_buy_percent(df_item_coef, fin_i_rank)
+        if item_pct is not None:
+            st.subheader("価格計算結果 (値入確認)")
             b_opt = st.selectbox("計算基準", BASE_OPTIONS, index=1)
             b_val = safe_to_number(st.text_input("基準金額", value=row.get("定価 (円)(商品属性.custom_list_price)", "0")))
             
-            bx = derive_base_x(b_opt, b_val, final_m_rank, df_maker_coef, item_pct)
-            calc_p = calc_all_prices(bx, final_m_rank, df_maker_coef, item_pct)
+            bx = derive_base_x(b_opt, b_val, fin_m_rank, df_maker_coef, item_pct)
+            calc_p = calc_all_prices(bx, fin_m_rank, df_maker_coef, item_pct)
             
-            # 推奨価格の表示（買取のみ切り下げ適用済みで表示）
+            # 多聞様向けの利益・値入計算
             disp_rows = []
             for rk in PRICE_RANKS:
-                s = calc_p[rk]["売価"]
-                b = floor_price_custom(calc_p[rk]["買取"]) if calc_p[rk]["買取"] else None
-                disp_rows.append({"ランク": rk, "売価": s, "買取(切下済)": b})
+                s = calc_p[rk]["売価"] or 0
+                b = floor_price_custom(calc_p[rk]["買取"]) if calc_p[rk]["買取"] else 0
+                profit = s - b
+                profit_rate = (profit / s * 100) if s > 0 else 0
+                disp_rows.append({
+                    "ランク": rk,
+                    "推奨売価": f"¥{s:,}",
+                    "推奨買取(切下)": f"¥{b:,}",
+                    "値入額": f"¥{profit:,}",
+                    "値入率": f"{profit_rate:.1f}%"
+                })
             
-            st.write("### 推奨価格一覧")
-            edited_df = st.data_editor(pd.DataFrame(disp_rows), use_container_width=True, hide_index=True)
+            st.table(pd.DataFrame(disp_rows))
             
-            update_yuragi = st.checkbox("メーカー・アイテムの紐づけ（揺らぎ）をマスターに反映する", value=False)
-            
-            if st.button("この価格で保存する", type="primary"):
-                with st.spinner("保存中..."):
-                    # 1. カタログ更新
+            update_yuragi = st.checkbox("この紐づけ(揺らぎ)をマスターに永久保存する", value=False)
+            if st.button("価格を保存する", type="primary"):
+                with st.spinner("スプレッドシートを更新中..."):
+                    # 1. カタログ本体の更新
                     update_cells_by_headers(env["ws_catalog"], row_no, {
-                        "商品名": edit_name, "型番(商品属性.mpn)": edit_mpn, "メーカー(商品属性.manufacturer)": final_m_name
+                        "商品名": edit_name,
+                        "型番(商品属性.mpn)": edit_mpn,
+                        "メーカー(商品属性.manufacturer)": fin_m_name
                     })
                     
-                    # 2. マスター更新（揺らぎメンテナンス）
+                    # 2. マスターのメンテナンス（揺らぎ付け替え）
                     if update_yuragi:
-                        if m_auto_hit and m_auto_name != final_m_name:
-                            move_yuragi_keyword(env["ss"], SHEET_MAKER, "メーカー名", "揺らぎ", "メーカーランク", m_auto_name, final_m_name, m_auto_hit, final_m_rank)
-                        if i_auto_hit and i_auto_name != final_i_name:
-                            move_yuragi_keyword(env["ss"], SHEET_ITEM, "アイテム名", "アイテムランク", "揺らぎ", i_auto_name, final_i_name, i_auto_hit, final_i_rank)
+                        if ma_h and ma_n != fin_m_name:
+                            move_yuragi_keyword(env["ss"], SHEET_MAKER, "メーカー名", "揺らぎ", "メーカーランク", ma_n, fin_m_name, ma_h, fin_m_rank)
+                        if ia_h and ia_n != fin_i_name:
+                            move_yuragi_keyword(env["ss"], SHEET_ITEM, "アイテム名", "揺らぎ", "アイテムランク", ia_n, fin_i_name, ia_h, fin_i_rank)
                     
                     # 3. ルール保存 (74列展開)
-                    rule_row_dict = build_rule_row(pid, row.get("商品コード", ""), row.get("画像URL", ""), calc_p)
-                    rule_row_no = find_row_number_by_key(env["ws_rules"], "商品ID", pid)
-                    if rule_row_no:
-                        update_cells_by_headers(env["ws_rules"], rule_row_no, rule_row_dict)
+                    r_row_dict = build_rule_row(pid, row.get("商品コード", ""), row.get("画像URL", ""), calc_p)
+                    r_no = find_row_number_by_key(env["ws_rules"], "商品ID", pid)
+                    if r_no:
+                        update_cells_by_headers(env["ws_rules"], r_no, r_row_dict)
                     else:
-                        headers = get_headers(env["ws_rules"])
-                        vals = [rule_row_dict.get(h, "") for h in headers]
+                        rule_headers = get_headers(env["ws_rules"])
+                        vals = [r_row_dict.get(h, "") for h in rule_headers]
                         call_with_retry(lambda: env["ws_rules"].append_row(vals))
                     
-                    st.success("保存完了しました！")
+                    st.success("価格情報を保存しました。")
                     st.cache_data.clear()
                     st.rerun()
+        else:
+            st.error("アイテム倍率マスタからランク情報が取得できません。ランク設定を確認してください。")
 
 # ---------------------------------------------------------
-# Page 3: 出力 (全機能を維持)
+# Page 3: 出力 & 本来のログ更新機能
 # ---------------------------------------------------------
 elif page == "3) 出力（ダウンロード）":
     st.header("3) 出力（ダウンロード）")
-    if st.button("出力用データを生成"):
-        with st.spinner("生成中..."):
-            # カタログ出力生成
-            df_cat = pd.DataFrame(env["ws_catalog"].get_all_values())
-            if not df_cat.empty:
-                df_cat.columns = df_cat.iloc[0]; df_cat = df_cat[1:]
-                df_exp = df_cat.reindex(columns=CATALOG_EXPORT_HEADERS_25).fillna("")
+    if st.button("出力用タブおよびログを最新に更新する"):
+        with st.spinner("全データを同期中..."):
+            # カタログ出力用の一時タブ更新
+            df_cat_full = pd.DataFrame(env["ws_catalog"].get_all_values())
+            df_tmp_cat = pd.DataFrame()
+            if not df_cat_full.empty:
+                df_cat_full.columns = df_cat_full.iloc[0]; df_cat_full = df_cat_full[1:]
+                df_tmp_cat = df_cat_full.reindex(columns=CATALOG_EXPORT_HEADERS_25).fillna("")
                 call_with_retry(lambda: env["ws_tmp_cat"].clear())
-                call_with_retry(lambda: env["ws_tmp_cat"].update(values=[CATALOG_EXPORT_HEADERS_25] + df_exp.values.tolist(), range_name="A1"))
+                call_with_retry(lambda: env["ws_tmp_cat"].update(values=[CATALOG_EXPORT_HEADERS_25] + df_tmp_cat.values.tolist(), range_name="A1"))
             
-            # ルール出力生成
-            df_rule = pd.DataFrame(env["ws_rules"].get_all_values())
-            if not df_rule.empty:
-                df_rule.columns = df_rule.iloc[0]; df_rule = df_rule[1:]
+            # ルール出力用の一時タブ更新
+            df_rule_full = pd.DataFrame(env["ws_rules"].get_all_values())
+            df_tmp_rules = pd.DataFrame()
+            if not df_rule_full.empty:
+                df_rule_full.columns = df_rule_full.iloc[0]; df_rule_full = df_rule_full[1:]
+                df_tmp_rules = df_rule_full.reindex(columns=RULE_EXPORT_HEADERS_74).fillna("")
                 call_with_retry(lambda: env["ws_tmp_rules"].clear())
-                call_with_retry(lambda: env["ws_tmp_rules"].update(values=[RULE_EXPORT_HEADERS_74] + df_rule.values.tolist(), range_name="A1"))
+                call_with_retry(lambda: env["ws_tmp_rules"].update(values=[RULE_EXPORT_HEADERS_74] + df_tmp_rules.values.tolist(), range_name="A1"))
+
+            # ログ記録機能（詳細版の復元）
+            today = datetime.date.today().strftime("%Y-%m-%d")
             
-            st.success("スプレッドシートの出力用タブを更新しました。")
+            def perform_detailed_logging(ws_log, df_source):
+                if df_source.empty or "商品ID" not in df_source.columns: return
+                # 既存ログの取得
+                log_data = call_with_retry(lambda: ws_log.get_all_values())
+                existed_ids = set()
+                if len(log_data) > 1:
+                    existed_ids = set(str(r[1]).strip() for r in log_data[1:] if len(r) > 1)
+                
+                new_entries = []
+                for current_id in df_source["商品ID"].astype(str).unique():
+                    kind = "更新" if current_id in existed_ids else "新規"
+                    new_entries.append([today, current_id, kind])
+                
+                if new_entries:
+                    call_with_retry(lambda: ws_log.append_rows(new_entries))
+
+            perform_detailed_logging(env["ws_log_cat"], df_tmp_cat)
+            perform_detailed_logging(env["ws_log_rules"], df_tmp_rules)
+
+            st.success("出力データの準備が整いました。ログにも反映済みです。")
